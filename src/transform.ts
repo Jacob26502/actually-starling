@@ -16,7 +16,13 @@ export interface ActualTransaction {
 	 * here so this function stays pure; resolving it requires calling the Actual API.
 	 */
 	spendingCategory?: string;
-	/** Set by resolveCategories(), not by this function. */
+	/**
+	 * A literal Actual category name a user rule wants applied (see rules.ts), taking
+	 * priority over spendingCategory when resolveTransactionCategory runs. Not set by this
+	 * function — rules run after transform, since they need the raw FeedItem too.
+	 */
+	categoryOverride?: string;
+	/** Set by resolveCategories()/resolveTransactionCategory(), not by this function. */
 	category?: string;
 }
 

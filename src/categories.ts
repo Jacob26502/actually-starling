@@ -26,29 +26,36 @@ function resolveGroup(): Promise<string> {
 	return groupIdPromise;
 }
 
+/** Cache is keyed by the *resolved display name*, not the raw input — see the two callers below. */
 const categoryIdCache = new Map<string, Promise<string>>();
 
 /**
- * Resolve a Starling spendingCategory to an Actual category id, creating it under a single
- * "Starling" category group the first time it's seen. Cached in memory for the process
- * lifetime; safe across restarts too, since categories are looked up by name — an existing
- * one is reused rather than duplicated.
+ * Resolve any category name to an Actual category id, creating it under a single "Starling"
+ * category group the first time it's seen. Cached in memory for the process lifetime; safe
+ * across restarts too, since categories are looked up by name — an existing one is reused
+ * rather than duplicated.
  */
-export function resolveCategory(spendingCategory: string): Promise<string> {
-	let promise = categoryIdCache.get(spendingCategory);
+export function resolveCategoryByName(name: string, isIncome = false): Promise<string> {
+	let promise = categoryIdCache.get(name);
 	if (!promise) {
 		promise = (async () => {
 			const groupId = await resolveGroup();
-			const name = humanizeSpendingCategory(spendingCategory);
-			return ensureCategory(name, groupId, INCOME_CATEGORIES.has(spendingCategory));
+			return ensureCategory(name, groupId, isIncome);
 		})();
-		categoryIdCache.set(spendingCategory, promise);
+		categoryIdCache.set(name, promise);
 	}
 	return promise;
 }
 
+/** Resolve a Starling spendingCategory (e.g. "EATING_OUT") specifically — see resolveCategoryByName. */
+export function resolveCategory(spendingCategory: string): Promise<string> {
+	return resolveCategoryByName(humanizeSpendingCategory(spendingCategory), INCOME_CATEGORIES.has(spendingCategory));
+}
+
 /**
- * Resolve one transaction's spendingCategory to a real Actual category id.
+ * Resolve one transaction's category to a real Actual category id — a user rule's
+ * `categoryOverride` (rules.ts) takes priority over Starling's own `spendingCategory` if both
+ * are present.
  *
  * Must run to completion *before* actual.ts's importTransactions is called — ensureCategory/
  * ensureCategoryGroup each go through withActual(), and withActual() is a serial queue, not
@@ -57,6 +64,10 @@ export function resolveCategory(spendingCategory: string): Promise<string> {
  * importTransactions) avoids that.
  */
 export async function resolveTransactionCategory(transaction: ActualTransaction): Promise<ActualTransaction> {
+	if (transaction.categoryOverride) {
+		const category = await resolveCategoryByName(transaction.categoryOverride);
+		return { ...transaction, category };
+	}
 	if (!transaction.spendingCategory) return transaction;
 	const category = await resolveCategory(transaction.spendingCategory);
 	return { ...transaction, category };

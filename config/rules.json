@@ -1,0 +1,11 @@
+{
+  "_comment": "Applied to every transaction on both /webhook and /backfill, after Starling's own spendingCategory but before it's resolved to an Actual category — a rule's \"category\" wins over spendingCategory when both apply. POST /rules/reload picks up edits without a restart.",
+  "rules": [
+    {
+      "name": "Round up",
+      "_comment": "Illustrative default — check what your own round-up transfers actually look like (userNote/reference/counterPartyName) and adjust the match below; this hasn't been verified against a real round-up transaction.",
+      "when": [{ "field": "userNote", "contains": "round up" }],
+      "then": { "category": "Round Up" }
+    }
+  ]
+}

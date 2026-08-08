@@ -69,7 +69,11 @@ Backfills every mapped category (add `"categoryUid"` to limit it to one, `"to"` 
 
 Transactions are also categorized automatically: Starling's own `spendingCategory` (e.g. `EATING_OUT`) is turned into an Actual category (`Eating Out`) under a single "Starling" category group, created the first time each one is actually seen. If you're backfilling transactions imported *before* this existed, re-running `/backfill` retroactively fills in their categories too — but only once; a category, once set (by this or by hand in Actual), won't be overwritten on a later re-run.
 
-Each account's balance is also forced to match Starling's real current balance, via a single adjustment transaction dated the day before `from` — otherwise real history predating your backfill's start date would make the account look like it starts from £0 (often going negative) instead of reflecting what was really there. Recomputed on every run, so it stays accurate as more transactions come in; the response's `balanceAdjustments` array shows what changed.
+Each account's balance is *meant* to also be forced to match Starling's real current balance — otherwise real history predating your backfill's start date would make the account look like it starts from £0 (often going negative) instead of reflecting what was really there. **This is currently disabled**: the working mechanism (a synthetic adjustment transaction, recomputed on every run) is commented out in favor of a direct `updateAccount` call that's expected not to actually change anything — see `CLAUDE.md` if you want to re-enable the version that works. The response's `balanceAdjustments` array shows `action: "attempted"` either way, which doesn't confirm success — check the account's balance in Actual directly.
+
+Transfers between your own mapped accounts/Spaces (moving money into a savings goal, for example) are detected and linked as a single Actual transfer — not left as two separate transactions that both count as spending/income. This works across `/webhook` and `/backfill` regardless of which side arrives first; whichever leg lands second finds the other and completes the link. Only works between two *different* Actual accounts — a Space merged into its parent via a shared `accountName` in `mapping.json` doesn't need linking, since both sides already land in the same account.
+
+Transactions can also be modified with your own simple rules (`config/rules.json`) — e.g. "if the note contains 'round up', categorize as Round Up" — matched against Starling's raw fields (`userNote`, `reference`, `counterPartyName`, `spendingCategory`, `source`; case-insensitive substring match) and applied in both `/webhook` and `/backfill`, before Starling's own category is resolved. `POST /rules/reload` picks up edits without a restart. This is separate from — and doesn't interact with — Actual's own rules feature, which never runs on anything this app imports (see `CLAUDE.md`).
 
 ### 3. Register the webhook
 
@@ -97,6 +101,7 @@ Don't run `docker compose config` without `--no-interpolate` against your real `
 | `GET  /discover`          | Starling accounts/Spaces + Actual accounts + mapping |
 | `POST /mapping/bootstrap` | Create missing Actual accounts, fill in the mapping  |
 | `POST /mapping/reload`    | Re-read `config/mapping.json`                        |
+| `POST /rules/reload`      | Re-read `config/rules.json`                          |
 | `GET  /health`            | Liveness check                                       |
 
 ## Scripts

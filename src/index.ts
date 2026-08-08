@@ -8,6 +8,7 @@ import { createAccount, importTransactions, listAccounts, setAccountBalance, shu
 import { reconcileAccountBalance } from './balance.ts';
 import { resolveCategories, resolveTransactionCategory } from './categories.ts';
 import { invalidateMapping, isUsable, loadMapping, resolveAccount, saveMapping } from './mapping.ts';
+import { applyRules, invalidateRules, loadRules } from './rules.ts';
 import {
 	discoverCategories,
 	getFeedItemsBetween,
@@ -17,6 +18,7 @@ import {
 	type FeedItemWebhookPayload,
 } from './starling.ts';
 import { toActualTransaction } from './transform.ts';
+import { tryLinkTransfer } from './transfers.ts';
 
 const app = new Hono();
 
@@ -72,13 +74,25 @@ app.post('/webhook', async (c) => {
 		return c.json({ status: 'skipped', reason: converted.reason });
 	}
 
-	const resolved = await resolveTransactionCategory(converted.transaction);
+	const rules = await loadRules();
+	const withRules = applyRules(item, converted.transaction, rules.rules);
+	const resolved = await resolveTransactionCategory(withRules);
 	const result = await importTransactions(mapped.actualAccountId, [resolved]);
+
+	// Best-effort: if this is one leg of an internal transfer and the other leg has already
+	// landed (via its own webhook event, or an earlier backfill), link them via transfer_id
+	// so Actual treats it as one transfer instead of two unlinked transactions. If the peer
+	// hasn't arrived yet, its own webhook event will find *this* transaction and link it then.
+	const ownTransactionId = result.idsByImportedId[item.feedItemUid];
+	const linked = ownTransactionId
+		? await tryLinkTransfer(item, mapped.actualAccountId, ownTransactionId, resolved.amount, resolved.date)
+		: false;
+
 	console.log(
 		`[webhook] ${profile.name}/${item.feedItemUid} → ${mapped.label ?? mapped.actualAccountId}: ` +
-			`+${result.added} added, ${result.updated} updated`,
+			`+${result.added} added, ${result.updated} updated${linked ? ', linked as transfer' : ''}`,
 	);
-	return c.json({ status: 'ok', ...result });
+	return c.json({ status: 'ok', ...result, linkedTransfer: linked });
 });
 
 /**
@@ -113,6 +127,12 @@ app.post('/mapping/reload', async (c) => {
 	invalidateMapping();
 	const mapping = await loadMapping();
 	return c.json({ status: 'reloaded', categories: Object.keys(mapping.categories).length });
+});
+
+app.post('/rules/reload', async (c) => {
+	invalidateRules();
+	const rules = await loadRules();
+	return c.json({ status: 'reloaded', rules: rules.rules.length });
 });
 
 /**
@@ -221,6 +241,7 @@ app.post('/backfill', async (c) => {
 	if (from > to) return c.json({ error: '"from" is after "to"' }, 400);
 
 	const mapping = await loadMapping();
+	const rules = await loadRules();
 	const categories = await discoverCategories();
 	const targets = categories.filter((category) => {
 		if (body.categoryUid && category.categoryUid !== body.categoryUid) return false;
@@ -244,6 +265,9 @@ app.post('/backfill', async (c) => {
 		}
 		let fetched = 0;
 		const transactions = [];
+		// Kept alongside `transactions` (same order) so transfer linking below can get back to
+		// each imported transaction's raw feed item — feedItemUid doubles as imported_id.
+		const itemsByFeedItemUid = new Map<string, FeedItem>();
 		// Aggregated so a wholly-skipped account (e.g. wrong currency) is obvious, not silent.
 		const skipReasons = new Map<string, number>();
 
@@ -259,8 +283,12 @@ app.post('/backfill', async (c) => {
 			fetched += items.length;
 			for (const item of items) {
 				const converted = toActualTransaction(item);
-				if (converted.ok) transactions.push(converted.transaction);
-				else skipReasons.set(converted.reason, (skipReasons.get(converted.reason) ?? 0) + 1);
+				if (converted.ok) {
+					transactions.push(applyRules(item, converted.transaction, rules.rules));
+					itemsByFeedItemUid.set(item.feedItemUid, item);
+				} else {
+					skipReasons.set(converted.reason, (skipReasons.get(converted.reason) ?? 0) + 1);
+				}
 			}
 		}
 
@@ -271,6 +299,18 @@ app.post('/backfill', async (c) => {
 			`[backfill] ${target.profile}/${target.label}: fetched ${fetched}, added ${result.added}, ` +
 				`updated ${result.updated}${skipReasons.size ? `, skipped ${JSON.stringify(skipped)}` : ''}`,
 		);
+
+		// Best-effort, order-independent (see transfers.ts) — attempted for every transaction
+		// just imported, not only newly-added ones, so a re-run can still link anything that
+		// missed its peer on a previous pass (e.g. the peer account backfilled after this one).
+		let linkedTransfers = 0;
+		for (const txn of resolved) {
+			const item = itemsByFeedItemUid.get(txn.imported_id);
+			const ownTransactionId = result.idsByImportedId[txn.imported_id];
+			if (!item || !ownTransactionId) continue;
+			if (await tryLinkTransfer(item, entry.actualAccountId, ownTransactionId, txn.amount, txn.date)) linkedTransfers++;
+		}
+
 		report.push({
 			profile: target.profile,
 			label: target.label,
@@ -278,6 +318,7 @@ app.post('/backfill', async (c) => {
 			fetched,
 			...result,
 			...(skipReasons.size ? { skipped } : {}),
+			...(linkedTransfers ? { linkedTransfers } : {}),
 		});
 	}
 

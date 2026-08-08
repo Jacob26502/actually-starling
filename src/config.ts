@@ -63,6 +63,7 @@ export const config = {
 		dataDir: process.env.ACTUAL_DATA_DIR ?? './.actual-cache',
 	},
 	mappingPath: process.env.MAPPING_PATH ?? './config/mapping.json',
+	rulesPath: process.env.RULES_PATH ?? './config/rules.json',
 } as const;
 
 export function findProfile(name: string): StarlingProfile | undefined {

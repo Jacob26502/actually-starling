@@ -108,6 +108,13 @@ export interface ImportResult {
 	added: number;
 	updated: number;
 	errors: number;
+	/**
+	 * Every added/updated transaction's real Actual id, keyed by its `imported_id`
+	 * (Starling's feedItemUid). Free — already present on reconcileTransactions' raw
+	 * response — used by transfers.ts to link a just-imported transaction without a
+	 * separate lookup query.
+	 */
+	idsByImportedId: Record<string, string>;
 }
 
 /**
@@ -120,25 +127,43 @@ export interface ImportResult {
  * `runRules`, and this project deliberately never uses it).
  */
 export function importTransactions(accountId: string, transactions: ActualTransaction[]): Promise<ImportResult> {
-	if (transactions.length === 0) return Promise.resolve({ added: 0, updated: 0, errors: 0 });
+	if (transactions.length === 0) return Promise.resolve({ added: 0, updated: 0, errors: 0, idsByImportedId: {} });
 
 	return withActual(async () => {
 		const result = (await actualApi.importTransactions(
 			accountId,
-			// spendingCategory is resolved into `category` by resolveCategories() before this is
-			// called — drop the raw string so we don't send Actual a field it doesn't recognise.
-			transactions.map(({ spendingCategory: _spendingCategory, ...txn }) => ({ ...txn, account: accountId })),
+			// spendingCategory/categoryOverride are resolved into `category` by
+			// resolveCategories()/applyRules() before this is called — drop the raw strings so we
+			// don't send Actual fields it doesn't recognise.
+			transactions.map(({ spendingCategory: _spendingCategory, categoryOverride: _categoryOverride, ...txn }) => ({
+				...txn,
+				account: accountId,
+			})),
 			// Respect each transaction's own `cleared` flag instead of forcing everything cleared.
 			{ defaultCleared: false },
-		)) as { added?: unknown[]; updated?: unknown[]; errors?: unknown[] };
+			// The declared return type (ReconcileTransactionsResult) says `added`/`updated` are
+			// bare `string[]` — wrong, verified against the actual reconcileTransactions source:
+			// `added.push(finalTransaction)` (a full object) and `updated.push({id, ...updates})`,
+			// both carrying `imported_id`. Cast through unknown to use the real shape.
+		)) as unknown as {
+			added?: { id: string; imported_id?: string }[];
+			updated?: { id: string; imported_id?: string }[];
+			errors?: unknown[];
+		};
 
 		// Push the new local state up to the sync server so other clients see it.
 		await actualApi.sync();
+
+		const idsByImportedId: Record<string, string> = {};
+		for (const txn of [...(result.added ?? []), ...(result.updated ?? [])]) {
+			if (txn.imported_id) idsByImportedId[txn.imported_id] = txn.id;
+		}
 
 		return {
 			added: result.added?.length ?? 0,
 			updated: result.updated?.length ?? 0,
 			errors: result.errors?.length ?? 0,
+			idsByImportedId,
 		};
 	});
 }
@@ -165,10 +190,55 @@ interface MinimalTransaction {
 	id: string;
 	imported_id?: string;
 	amount: number;
+	transfer_id?: string | null;
 }
 
 export function getTransactions(accountId: string, startDate: string, endDate: string): Promise<MinimalTransaction[]> {
 	return withActual(() => actualApi.getTransactions(accountId, startDate, endDate) as Promise<MinimalTransaction[]>);
+}
+
+/**
+ * Find an unlinked transaction on `accountId` matching an expected transfer counterpart:
+ * same date, exact opposite amount, not already linked to some other transfer. Day-level
+ * granularity only (Actual transactions don't store time-of-day) — matches the same
+ * precision Actual's own built-in transfer linking uses (verified against source: `addTransfer`
+ * matches on `date`, not timestamp).
+ */
+export function findTransferPeer(accountId: string, expectedAmount: number, date: string): Promise<MinimalTransaction | null> {
+	return withActual(async () => {
+		const transactions = (await actualApi.getTransactions(accountId, date, date)) as MinimalTransaction[];
+		return transactions.find((txn) => txn.amount === expectedAmount && !txn.transfer_id) ?? null;
+	});
+}
+
+/**
+ * Link two already-imported transactions as a transfer pair, replicating what Actual's own
+ * `addTransfer` does for its (unused-here) addTransactions path: set `transfer_id` on both
+ * sides, and clear `category` on both if the two accounts share on/off-budget status (a
+ * transfer between two on-budget or two off-budget accounts isn't spending or income).
+ */
+export function linkTransferPair(accountA: string, idA: string, accountB: string, idB: string): Promise<void> {
+	return withActual(async () => {
+		const accounts = (await actualApi.getAccounts()) as { id: string; offbudget?: boolean }[];
+		const offbudgetA = accounts.find((account) => account.id === accountA)?.offbudget;
+		const offbudgetB = accounts.find((account) => account.id === accountB)?.offbudget;
+		const clearCategory = offbudgetA === offbudgetB;
+		// TransactionEntity['category'] is typed as never accepting null, but clearCategory()'s
+		// real implementation does exactly `{category: null}` to clear one — the type is wrong,
+		// not the runtime behaviour. Cast through unknown to use it as verified.
+		const fieldsA = { transfer_id: idB, ...(clearCategory ? { category: null } : {}) } as unknown as Partial<{
+			transfer_id: string;
+			category: string;
+		}>;
+		const fieldsB = { transfer_id: idA, ...(clearCategory ? { category: null } : {}) } as unknown as Partial<{
+			transfer_id: string;
+			category: string;
+		}>;
+
+		await actualApi.updateTransaction(idA, fieldsA);
+		await actualApi.updateTransaction(idB, fieldsB);
+		await actualApi.sync();
+	});
 }
 
 /**

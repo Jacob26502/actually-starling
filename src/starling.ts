@@ -24,6 +24,12 @@ export interface FeedItem {
 	status?: string;
 	counterPartyType?: string;
 	counterPartyName?: string;
+	/**
+	 * For an internal transfer (source: "INTERNAL_TRANSFER", counterPartyType: "CATEGORY"),
+	 * this is the *destination category's* categoryUid — not a specific transaction id. Used
+	 * by transfers.ts to look up which Actual account the other leg landed in.
+	 */
+	counterPartyUid?: string;
 	reference?: string;
 	spendingCategory?: string;
 	userNote?: string;
