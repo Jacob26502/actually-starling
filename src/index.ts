@@ -163,6 +163,49 @@ app.get('/debug/balance', async (c) => {
 	return c.json({ results });
 });
 
+/**
+ * Diagnostic: group an Actual account's transactions by (date, amount) to surface anything
+ * that looks like the same real-world event counted more than once — different imported_id,
+ * same date+amount. Read-only.
+ */
+app.get('/debug/duplicates', async (c) => {
+	const actualAccountId = c.req.query('actualAccountId');
+	if (!actualAccountId) return c.json({ error: 'query param actualAccountId is required' }, 400);
+
+	const transactions = await getTransactions(actualAccountId, '0001-01-01', '9999-12-31');
+
+	const groups = new Map<string, typeof transactions>();
+	for (const txn of transactions) {
+		const key = `${txn.date}|${txn.amount}`;
+		const group = groups.get(key) ?? [];
+		group.push(txn);
+		groups.set(key, group);
+	}
+
+	const suspicious = [...groups.entries()]
+		.filter(([, group]) => group.length > 1)
+		.map(([key, group]) => ({
+			key,
+			count: group.length,
+			// If this really is the same event counted N times, N-1 copies are excess value.
+			excessValue: (group.reduce((sum, txn) => sum + txn.amount, 0) / group.length) * (group.length - 1),
+			transactions: group.map((txn) => ({
+				id: txn.id,
+				imported_id: txn.imported_id,
+				transfer_id: txn.transfer_id,
+				notes: txn.notes,
+			})),
+		}));
+
+	return c.json({
+		actualAccountId,
+		totalTransactions: transactions.length,
+		suspiciousGroups: suspicious.length,
+		totalExcessValue: suspicious.reduce((sum, g) => sum + g.excessValue, 0),
+		groups: suspicious,
+	});
+});
+
 app.post('/mapping/reload', async (c) => {
 	invalidateMapping();
 	const mapping = await loadMapping();

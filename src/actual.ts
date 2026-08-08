@@ -191,6 +191,10 @@ interface MinimalTransaction {
 	imported_id?: string;
 	amount: number;
 	transfer_id?: string | null;
+	date?: string;
+	payee_name?: string;
+	imported_payee?: string;
+	notes?: string;
 }
 
 export function getTransactions(accountId: string, startDate: string, endDate: string): Promise<MinimalTransaction[]> {
