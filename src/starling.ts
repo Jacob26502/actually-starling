@@ -95,23 +95,41 @@ export function profilesWithWebhookSecret(): StarlingProfile[] {
 	return config.starling.profiles.filter((profile) => Boolean(profile.webhookSecret));
 }
 
+const MAX_RATE_LIMIT_RETRIES = 5;
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function starlingGet<T>(profile: StarlingProfile, path: string, params?: Record<string, string>): Promise<T> {
 	const url = new URL(path, config.starling.apiUrl);
 	for (const [key, value] of Object.entries(params ?? {})) url.searchParams.set(key, value);
 
-	const res = await fetch(url, {
-		headers: {
-			Authorization: `Bearer ${profile.accessToken}`,
-			Accept: 'application/json',
-			'User-Agent': 'actually-starling',
-		},
-	});
+	for (let attempt = 0; ; attempt++) {
+		const res = await fetch(url, {
+			headers: {
+				Authorization: `Bearer ${profile.accessToken}`,
+				Accept: 'application/json',
+				'User-Agent': 'actually-starling',
+			},
+		});
 
-	if (!res.ok) {
+		if (res.ok) return (await res.json()) as T;
+
+		// A backfill across several accounts/months can throw dozens of requests at Starling
+		// in quick succession — retry 429s with backoff instead of aborting the whole run.
+		if (res.status === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
+			const retryAfterHeader = res.headers.get('retry-after');
+			const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : NaN;
+			const delayMs = Number.isFinite(retryAfterMs) ? retryAfterMs : 2 ** attempt * 1000;
+			console.warn(`[starling] 429 on ${path}, retrying in ${delayMs}ms (attempt ${attempt + 1}/${MAX_RATE_LIMIT_RETRIES})`);
+			await sleep(delayMs);
+			continue;
+		}
+
 		const body = await res.text().catch(() => '');
 		throw new StarlingError(`Starling ${res.status} on ${path} (profile "${profile.name}"): ${body.slice(0, 400)}`, res.status);
 	}
-	return (await res.json()) as T;
 }
 
 export async function getAccounts(profile: StarlingProfile): Promise<StarlingAccount[]> {
