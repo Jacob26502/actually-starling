@@ -304,6 +304,33 @@ app.get('/debug/verify', async (c) => {
 	});
 });
 
+/**
+ * Diagnostic: across a set of accounts, find any transaction whose transfer_id points to a
+ * transaction id that no longer exists — i.e. its transfer partner was deleted without also
+ * clearing this side's reference. Read-only.
+ */
+app.get('/debug/orphaned-transfers', async (c) => {
+	const accountIds = (c.req.query('actualAccountIds') ?? '').split(',').filter(Boolean);
+	if (accountIds.length === 0) return c.json({ error: 'query param actualAccountIds (comma-separated) is required' }, 400);
+
+	const perAccount = await Promise.all(
+		accountIds.map(async (accountId) => ({ accountId, transactions: await getTransactions(accountId, '0001-01-01', '9999-12-31') })),
+	);
+
+	const allIds = new Set(perAccount.flatMap(({ transactions }) => transactions.map((txn) => txn.id)));
+
+	const orphans = [];
+	for (const { accountId, transactions } of perAccount) {
+		for (const txn of transactions) {
+			if (txn.transfer_id && !allIds.has(txn.transfer_id)) {
+				orphans.push({ accountId, id: txn.id, date: txn.date, amount: txn.amount, notes: txn.notes, danglingTransferId: txn.transfer_id });
+			}
+		}
+	}
+
+	return c.json({ accountsChecked: accountIds.length, totalTransactions: allIds.size, orphanedCount: orphans.length, orphans });
+});
+
 app.post('/mapping/reload', async (c) => {
 	invalidateMapping();
 	const mapping = await loadMapping();
