@@ -266,6 +266,44 @@ app.post('/debug/duplicates/delete', async (c) => {
 	return c.json({ results });
 });
 
+/**
+ * Diagnostic: raw SUM(amount) computed directly here from getTransactions, alongside
+ * whatever getAccountBalance() itself reports — the two should always agree; if they don't,
+ * something other than a straightforward SUM is happening. Also flags the largest individual
+ * transactions, and confirms a given list of ids is (or isn't) still present.
+ */
+app.get('/debug/verify', async (c) => {
+	const actualAccountId = c.req.query('actualAccountId');
+	if (!actualAccountId) return c.json({ error: 'query param actualAccountId is required' }, 400);
+	const checkIds = (c.req.query('checkIds') ?? '').split(',').filter(Boolean);
+
+	const [reportedBalance, transactions] = await Promise.all([
+		getAccountBalance(actualAccountId),
+		getTransactions(actualAccountId, '0001-01-01', '9999-12-31'),
+	]);
+
+	const rawSum = transactions.reduce((sum, txn) => sum + txn.amount, 0);
+	const byAmountDesc = [...transactions].sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount)).slice(0, 15);
+	const stillPresent = checkIds.filter((id) => transactions.some((txn) => txn.id === id));
+
+	return c.json({
+		actualAccountId,
+		transactionCount: transactions.length,
+		reportedBalance,
+		rawSum,
+		agree: reportedBalance === rawSum,
+		largestTransactions: byAmountDesc.map((txn) => ({
+			id: txn.id,
+			date: txn.date,
+			amount: txn.amount,
+			notes: txn.notes,
+			imported_id: txn.imported_id,
+			transfer_id: txn.transfer_id,
+		})),
+		checkIds: { requested: checkIds.length, stillPresent },
+	});
+});
+
 app.post('/mapping/reload', async (c) => {
 	invalidateMapping();
 	const mapping = await loadMapping();
