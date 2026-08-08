@@ -54,6 +54,13 @@ export interface StarlingCategory {
 	currency: string;
 	accountType?: string;
 	kind: 'main' | 'savings-goal' | 'spending-space';
+	/**
+	 * Current real balance, in this category's own minor units, always non-negative — money
+	 * literally present. For `kind: 'main'` this is `clearedBalance` (the spendable pot,
+	 * excluding money already moved into Spaces — those are separate categories with their
+	 * own balance). Absent if the balance couldn't be determined.
+	 */
+	balanceMinorUnits?: number;
 }
 
 export class StarlingError extends Error {
@@ -137,6 +144,18 @@ export async function getAccounts(profile: StarlingProfile): Promise<StarlingAcc
 	return data.accounts ?? [];
 }
 
+type AccountBalanceResponse = { clearedBalance?: CurrencyAndAmount };
+
+/**
+ * The main account's current spendable balance — `clearedBalance`, not `totalClearedBalance`
+ * (which also includes money held in this account's Spaces, double-counting balances that
+ * are tracked as their own separate categories).
+ */
+export async function getAccountBalance(profile: StarlingProfile, accountUid: string): Promise<CurrencyAndAmount | null> {
+	const data = await starlingGet<AccountBalanceResponse>(profile, `/api/v2/accounts/${accountUid}/balance`);
+	return data.clearedBalance ?? null;
+}
+
 /**
  * Enumerate every (accountUid, categoryUid) pair visible across all configured tokens.
  *
@@ -150,6 +169,7 @@ export async function discoverCategories(): Promise<StarlingCategory[]> {
 			const found: StarlingCategory[] = [];
 			for (const account of await getAccounts(profile)) {
 				const accountLabel = account.name ?? account.accountType ?? 'Starling';
+				const balance = await getAccountBalance(profile, account.accountUid).catch(() => null);
 				found.push({
 					profile: profile.name,
 					accountUid: account.accountUid,
@@ -158,6 +178,7 @@ export async function discoverCategories(): Promise<StarlingCategory[]> {
 					currency: account.currency,
 					accountType: account.accountType,
 					kind: 'main',
+					balanceMinorUnits: balance?.minorUnits,
 				});
 
 				for (const space of await getSpaces(profile, account.accountUid)) {
@@ -200,6 +221,7 @@ async function getSpaces(profile: StarlingProfile, accountUid: string): Promise<
 			label: goal.name ?? 'Savings goal',
 			currency: goal.totalSaved?.currency ?? '',
 			kind: 'savings-goal',
+			balanceMinorUnits: goal.totalSaved?.minorUnits,
 		});
 	}
 	for (const space of data.spendingSpaces ?? []) {
@@ -210,6 +232,7 @@ async function getSpaces(profile: StarlingProfile, accountUid: string): Promise<
 			label: space.name ?? 'Spending space',
 			currency: space.balance?.currency ?? '',
 			kind: 'spending-space',
+			balanceMinorUnits: space.balance?.minorUnits,
 		});
 	}
 	return spaces;

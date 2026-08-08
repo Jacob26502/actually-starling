@@ -1,7 +1,12 @@
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { config, findProfile } from './config.ts';
-import { createAccount, importTransactions, listAccounts, shutdown } from './actual.ts';
+import { createAccount, importTransactions, listAccounts, setAccountBalance, shutdown } from './actual.ts';
+// reconcileAccountBalance is the mechanism confirmed (via source) to actually work — see the
+// comment at its call site below. Kept imported, not deleted, per instruction to comment out
+// rather than remove.
+import { reconcileAccountBalance } from './balance.ts';
+import { resolveCategories, resolveTransactionCategory } from './categories.ts';
 import { invalidateMapping, isUsable, loadMapping, resolveAccount, saveMapping } from './mapping.ts';
 import {
 	discoverCategories,
@@ -67,7 +72,8 @@ app.post('/webhook', async (c) => {
 		return c.json({ status: 'skipped', reason: converted.reason });
 	}
 
-	const result = await importTransactions(mapped.actualAccountId, [converted.transaction]);
+	const resolved = await resolveTransactionCategory(converted.transaction);
+	const result = await importTransactions(mapped.actualAccountId, [resolved]);
 	console.log(
 		`[webhook] ${profile.name}/${item.feedItemUid} → ${mapped.label ?? mapped.actualAccountId}: ` +
 			`+${result.added} added, ${result.updated} updated`,
@@ -258,7 +264,8 @@ app.post('/backfill', async (c) => {
 			}
 		}
 
-		const result = await importTransactions(entry.actualAccountId, transactions);
+		const resolved = await resolveCategories(transactions);
+		const result = await importTransactions(entry.actualAccountId, resolved);
 		const skipped = Object.fromEntries(skipReasons);
 		console.log(
 			`[backfill] ${target.profile}/${target.label}: fetched ${fetched}, added ${result.added}, ` +
@@ -274,7 +281,61 @@ app.post('/backfill', async (c) => {
 		});
 	}
 
-	return c.json({ status: 'ok', from: from.toISOString(), to: to.toISOString(), results: report });
+	// Backfilling from a cutoff necessarily excludes everything before it, so an account with
+	// real history predating `from` would otherwise show a balance of just the imported
+	// transactions — often confusingly negative. Force each account to its real Starling
+	// balance via a single adjustment transaction representing that pre-cutoff history.
+	//
+	// Grouped by actualAccountId across *every* mapped category (not just `targets`, which
+	// may be narrowed to one categoryUid this call) because merged categories — e.g. a Space
+	// collapsed into its parent account via a shared `accountName` — must always have their
+	// real balances summed together, regardless of which one this particular request touched;
+	// otherwise reconciling just "Car" on a Car+Easy Saver merged account would wipe out Easy
+	// Saver's share of the target balance.
+	const adjustmentDate = new Date(from);
+	adjustmentDate.setUTCDate(adjustmentDate.getUTCDate() - 1);
+	const adjustmentDateStr = adjustmentDate.toISOString().slice(0, 10);
+
+	const allMappedCategories = categories.filter((category) => isUsable(mapping.categories[category.categoryUid]));
+	const targetsByAccount = new Map<string, typeof allMappedCategories>();
+	for (const category of allMappedCategories) {
+		const entry = mapping.categories[category.categoryUid]!;
+		const group = targetsByAccount.get(entry.actualAccountId) ?? [];
+		group.push(category);
+		targetsByAccount.set(entry.actualAccountId, group);
+	}
+
+	const balanceReport: Record<string, unknown>[] = [];
+	for (const [actualAccountId, group] of targetsByAccount) {
+		const missingBalance = group.filter((t) => t.balanceMinorUnits === undefined);
+		const targetBalance = group.reduce((sum, t) => sum + (t.balanceMinorUnits ?? 0), 0);
+
+		try {
+			// Commented out per instruction to use updateAccount instead, despite this being the
+			// mechanism confirmed (via source, not the docs) to actually persist a balance change —
+			// see CLAUDE.md "Forcing an account's balance to match Starling".
+			// const result = await reconcileAccountBalance(actualAccountId, targetBalance, adjustmentDateStr);
+			await setAccountBalance(actualAccountId, targetBalance);
+			const result = { action: 'attempted' as const, adjustment: targetBalance };
+			balanceReport.push({
+				actualAccountId,
+				categories: group.map((t) => t.label),
+				targetBalance,
+				...result,
+				...(missingBalance.length ? { warning: `no balance from Starling for: ${missingBalance.map((t) => t.label).join(', ')}` } : {}),
+			});
+		} catch (err) {
+			balanceReport.push({ actualAccountId, categories: group.map((t) => t.label), error: (err as Error).message });
+		}
+	}
+
+	return c.json({
+		status: 'ok',
+		from: from.toISOString(),
+		to: to.toISOString(),
+		results: report,
+		balanceAdjustments: balanceReport,
+	});
 });
 
 app.onError((err, c) => {

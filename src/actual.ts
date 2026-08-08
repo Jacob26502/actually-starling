@@ -73,6 +73,37 @@ export function createAccount(name: string, offbudget = false): Promise<string> 
 	});
 }
 
+/** Look up a category group by name, creating it if it doesn't exist yet. */
+export function ensureCategoryGroup(name: string): Promise<string> {
+	return withActual(async () => {
+		const groups = (await actualApi.getCategoryGroups()) as { id: string; name: string }[];
+		const existing = groups.find((group) => group.name === name);
+		if (existing) return existing.id;
+
+		const id = (await actualApi.createCategoryGroup({ name, is_income: false, hidden: false })) as string;
+		await actualApi.sync();
+		return id;
+	});
+}
+
+/** Look up a category by name within a group, creating it if it doesn't exist yet. */
+export function ensureCategory(name: string, groupId: string, isIncome: boolean): Promise<string> {
+	return withActual(async () => {
+		const categories = (await actualApi.getCategories()) as { id: string; name: string; group_id: string }[];
+		const existing = categories.find((category) => category.name === name && category.group_id === groupId);
+		if (existing) return existing.id;
+
+		const id = (await actualApi.createCategory({
+			name,
+			group_id: groupId,
+			is_income: isIncome,
+			hidden: false,
+		})) as string;
+		await actualApi.sync();
+		return id;
+	});
+}
+
 export interface ImportResult {
 	added: number;
 	updated: number;
@@ -82,8 +113,11 @@ export interface ImportResult {
 /**
  * Import transactions into one Actual account.
  *
- * Uses importTransactions (not addTransactions) so Actual reconciles on `imported_id` and
- * applies the budget's payee/category rules — replaying the same feed item is a no-op.
+ * Uses importTransactions (not addTransactions) so Actual reconciles on `imported_id` —
+ * replaying the same feed item is a no-op. Note this does NOT run the budget's rules
+ * (verified against @actual-app/api's bundled source: `importTransactions` calls straight
+ * into `reconcileTransactions`, no rules step; `addTransactions` is the one that calls
+ * `runRules`, and this project deliberately never uses it).
  */
 export function importTransactions(accountId: string, transactions: ActualTransaction[]): Promise<ImportResult> {
 	if (transactions.length === 0) return Promise.resolve({ added: 0, updated: 0, errors: 0 });
@@ -91,7 +125,9 @@ export function importTransactions(accountId: string, transactions: ActualTransa
 	return withActual(async () => {
 		const result = (await actualApi.importTransactions(
 			accountId,
-			transactions.map((txn) => ({ ...txn, account: accountId })),
+			// spendingCategory is resolved into `category` by resolveCategories() before this is
+			// called — drop the raw string so we don't send Actual a field it doesn't recognise.
+			transactions.map(({ spendingCategory: _spendingCategory, ...txn }) => ({ ...txn, account: accountId })),
 			// Respect each transaction's own `cleared` flag instead of forcing everything cleared.
 			{ defaultCleared: false },
 		)) as { added?: unknown[]; updated?: unknown[]; errors?: unknown[] };
@@ -104,6 +140,46 @@ export function importTransactions(accountId: string, transactions: ActualTransa
 			updated: result.updated?.length ?? 0,
 			errors: result.errors?.length ?? 0,
 		};
+	});
+}
+
+/** Current computed balance (sum of all non-tombstoned transactions), in signed minor units. */
+export function getAccountBalance(accountId: string): Promise<number> {
+	return withActual(() => actualApi.getAccountBalance(accountId));
+}
+
+/**
+ * Attempts to set an account's balance directly via updateAccount, per explicit instruction
+ * to use this despite it having no verified effect: the real underlying implementation only
+ * ever persists `{id, name, last_reconciled}` — `balance_current` here is silently discarded,
+ * not an error. See CLAUDE.md and src/balance.ts for the mechanism that actually works.
+ */
+export function setAccountBalance(accountId: string, balanceMinorUnits: number): Promise<void> {
+	return withActual(async () => {
+		await actualApi.updateAccount(accountId, { balance_current: balanceMinorUnits });
+		await actualApi.sync();
+	});
+}
+
+interface MinimalTransaction {
+	id: string;
+	imported_id?: string;
+	amount: number;
+}
+
+export function getTransactions(accountId: string, startDate: string, endDate: string): Promise<MinimalTransaction[]> {
+	return withActual(() => actualApi.getTransactions(accountId, startDate, endDate) as Promise<MinimalTransaction[]>);
+}
+
+/**
+ * Directly patch a transaction's amount. Unlike importTransactions' reconciliation (which
+ * deliberately never touches `amount` on an existing match — verified against source), this
+ * always applies it: updateTransaction spreads `{...existing, ...fields}` with no filtering.
+ */
+export function updateTransactionAmount(id: string, amount: number): Promise<void> {
+	return withActual(async () => {
+		await actualApi.updateTransaction(id, { amount });
+		await actualApi.sync();
 	});
 }
 

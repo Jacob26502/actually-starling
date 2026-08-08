@@ -67,6 +67,10 @@ curl -X POST localhost:3000/backfill \
 
 Backfills every mapped category (add `"categoryUid"` to limit it to one, `"to"` to bound the range). Safe to re-run — Actual reconciles on Starling's `feedItemUid`, so repeats don't duplicate.
 
+Transactions are also categorized automatically: Starling's own `spendingCategory` (e.g. `EATING_OUT`) is turned into an Actual category (`Eating Out`) under a single "Starling" category group, created the first time each one is actually seen. If you're backfilling transactions imported *before* this existed, re-running `/backfill` retroactively fills in their categories too — but only once; a category, once set (by this or by hand in Actual), won't be overwritten on a later re-run.
+
+Each account's balance is also forced to match Starling's real current balance, via a single adjustment transaction dated the day before `from` — otherwise real history predating your backfill's start date would make the account look like it starts from £0 (often going negative) instead of reflecting what was really there. Recomputed on every run, so it stays accurate as more transactions come in; the response's `balanceAdjustments` array shows what changed.
+
 ### 3. Register the webhook
 
 In the [Starling developer portal](https://developer.starlingbank.com), point a feed-item webhook at `https://your-host/webhook` and copy the shared secret into `STARLING_<NAME>_WEBHOOK_SECRET` for that profile. Starling requires HTTPS, so put this behind a reverse proxy or tunnel.

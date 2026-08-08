@@ -10,6 +10,14 @@ export interface ActualTransaction {
 	imported_id: string;
 	notes?: string;
 	cleared: boolean;
+	/**
+	 * Starling's raw spendingCategory (e.g. "EATING_OUT"), not yet an Actual category id.
+	 * Resolved separately by categories.ts's resolveCategories() — kept as a plain string
+	 * here so this function stays pure; resolving it requires calling the Actual API.
+	 */
+	spendingCategory?: string;
+	/** Set by resolveCategories(), not by this function. */
+	category?: string;
 }
 
 /** Starling statuses that never moved money and must not become transactions. */
@@ -88,6 +96,7 @@ export function toActualTransaction(item: FeedItem): TransformResult {
 			imported_id: item.feedItemUid,
 			notes: notes.length ? notes.join(' · ') : undefined,
 			cleared: item.status === 'SETTLED',
+			spendingCategory: item.spendingCategory,
 		},
 	};
 }
