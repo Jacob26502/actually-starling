@@ -1,7 +1,16 @@
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { config, findProfile } from './config.ts';
-import { createAccount, getAccountBalance, getTransactions, importTransactions, listAccounts, setAccountBalance, shutdown } from './actual.ts';
+import {
+	createAccount,
+	deleteTransactionById,
+	getAccountBalance,
+	getTransactions,
+	importTransactions,
+	listAccounts,
+	setAccountBalance,
+	shutdown,
+} from './actual.ts';
 // reconcileAccountBalance is the mechanism confirmed (via source) to actually work — see the
 // comment at its call site below. Kept imported, not deleted, per instruction to comment out
 // rather than remove.
@@ -164,9 +173,14 @@ app.get('/debug/balance', async (c) => {
 });
 
 /**
- * Diagnostic: group an Actual account's transactions by (date, amount) to surface anything
- * that looks like the same real-world event counted more than once — different imported_id,
- * same date+amount. Read-only.
+ * Diagnostic: find likely duplicate transactions — same date, amount, AND notes, where one
+ * copy has no imported_id (never came from Starling; likely entered by hand before this sync
+ * existed) and another does. Read-only; classifies rather than acts.
+ *
+ * Deliberately conservative: a (date, amount) match with *different* notes, or a group with
+ * no real imported_id to anchor against, is left for manual review rather than guessed at —
+ * real data included both (JOHN LEWIS STORES vs STAGECOACH SERVICES sharing a date+amount by
+ * coincidence; two genuinely separate "Round Up" entries with no imported original at all).
  */
 app.get('/debug/duplicates', async (c) => {
 	const actualAccountId = c.req.query('actualAccountId');
@@ -182,28 +196,74 @@ app.get('/debug/duplicates', async (c) => {
 		groups.set(key, group);
 	}
 
-	const suspicious = [...groups.entries()]
-		.filter(([, group]) => group.length > 1)
-		.map(([key, group]) => ({
-			key,
-			count: group.length,
-			// If this really is the same event counted N times, N-1 copies are excess value.
-			excessValue: (group.reduce((sum, txn) => sum + txn.amount, 0) / group.length) * (group.length - 1),
-			transactions: group.map((txn) => ({
-				id: txn.id,
-				imported_id: txn.imported_id,
-				transfer_id: txn.transfer_id,
-				notes: txn.notes,
-			})),
-		}));
+	const safeToDelete: { id: string; date?: string; amount: number; notes: string | null }[] = [];
+	const needsReview: Record<string, unknown>[] = [];
+
+	for (const [key, group] of groups) {
+		if (group.length < 2) continue;
+
+		const byNotes = new Map<string, typeof group>();
+		for (const txn of group) {
+			const notesKey = (txn.notes ?? '').trim().toLowerCase();
+			const sub = byNotes.get(notesKey) ?? [];
+			sub.push(txn);
+			byNotes.set(notesKey, sub);
+		}
+
+		for (const [notesKey, sub] of byNotes) {
+			if (sub.length < 2) continue; // unique within this (date, amount, notes) — leave alone
+			const withImportedId = sub.filter((txn) => txn.imported_id);
+			const withoutImportedId = sub.filter((txn) => !txn.imported_id);
+
+			// Safe: exactly one real, imported copy to anchor against, and the rest have no
+			// imported_id at all — those are the ones to remove. Anything messier (multiple
+			// real copies, or none at all) goes to manual review instead of being guessed at.
+			if (withImportedId.length === 1 && withoutImportedId.length >= 1) {
+				for (const txn of withoutImportedId) {
+					safeToDelete.push({ id: txn.id, date: txn.date, amount: txn.amount, notes: txn.notes ?? null });
+				}
+			} else {
+				needsReview.push({
+					key,
+					notes: notesKey || '(blank)',
+					transactions: sub.map((txn) => ({ id: txn.id, imported_id: txn.imported_id, notes: txn.notes })),
+				});
+			}
+		}
+	}
 
 	return c.json({
 		actualAccountId,
 		totalTransactions: transactions.length,
-		suspiciousGroups: suspicious.length,
-		totalExcessValue: suspicious.reduce((sum, g) => sum + g.excessValue, 0),
-		groups: suspicious,
+		safeToDelete: {
+			count: safeToDelete.length,
+			totalValue: safeToDelete.reduce((sum, txn) => sum + txn.amount, 0),
+			transactions: safeToDelete,
+		},
+		needsReview,
 	});
+});
+
+/**
+ * Deletes an explicit, caller-provided list of transaction ids. Body: { "ids": ["...", ...] }.
+ * Intended to be called with exactly the `safeToDelete` list from GET /debug/duplicates after
+ * a human has reviewed it — never derives what to delete itself.
+ */
+app.post('/debug/duplicates/delete', async (c) => {
+	const body = await c.req.json<{ ids?: string[] }>().catch(() => ({}) as { ids?: string[] });
+	if (!body.ids?.length) return c.json({ error: 'body must include a non-empty "ids" array' }, 400);
+
+	const results = [];
+	for (const id of body.ids) {
+		try {
+			await deleteTransactionById(id);
+			results.push({ id, status: 'deleted' });
+		} catch (err) {
+			results.push({ id, status: 'error', message: (err as Error).message });
+		}
+	}
+
+	return c.json({ results });
 });
 
 app.post('/mapping/reload', async (c) => {

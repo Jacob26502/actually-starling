@@ -194,11 +194,23 @@ interface MinimalTransaction {
 	date?: string;
 	payee_name?: string;
 	imported_payee?: string;
-	notes?: string;
+	notes?: string | null;
 }
 
 export function getTransactions(accountId: string, startDate: string, endDate: string): Promise<MinimalTransaction[]> {
 	return withActual(() => actualApi.getTransactions(accountId, startDate, endDate) as Promise<MinimalTransaction[]>);
+}
+
+/**
+ * Deletes one transaction. Deliberately not wired into any automatic cleanup — always called
+ * with an explicit, human-reviewed id list from POST /debug/duplicates/delete, never derived
+ * and acted on in the same step.
+ */
+export function deleteTransactionById(id: string): Promise<void> {
+	return withActual(async () => {
+		await actualApi.deleteTransaction(id);
+		await actualApi.sync();
+	});
 }
 
 /**
