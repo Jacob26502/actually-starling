@@ -4,6 +4,8 @@ Syncs [Starling Bank](https://www.starlingbank.com/) transactions into [Actual B
 
 ## Setup
 
+Requires Node ≥22.18. Package management is via bun (`bun install`, `bun.lock`), but the server itself runs on Node, not `bun run` — a core dependency (`@actual-app/api`, via `better-sqlite3`) needs a native module Bun doesn't support yet. `bun run dev`/`bun run start` just invoke `node --env-file=.env ...` under the hood, so this is transparent day to day; see `CLAUDE.md` if you're curious why.
+
 ```txt
 bun install
 cp .env.example .env          # fill in Starling tokens + Actual server details
@@ -32,7 +34,7 @@ With the server running, ask it what it can see:
 curl -s localhost:3000/discover | jq
 ```
 
-This lists every Starling `(accountUid, categoryUid)` across all configured tokens — your main accounts *and* every Space — next to your Actual accounts, with the `profile` each came from.
+This lists every Starling `(accountUid, categoryUid)` across all configured tokens — your main accounts *and* every Space — next to your Actual accounts, with the `profile` each came from. An Actual budget is single-currency (`BUDGET_CURRENCY`, default `GBP`); categories in any other currency are flagged with `currencyMismatch: true` and can't be synced — a Starling account with a EUR balance can't feed a GBP budget without silently misrepresenting amounts, so it's refused rather than imported at face value.
 
 Then create the matching Actual accounts and fill in the ids automatically:
 
@@ -41,7 +43,7 @@ curl -X POST localhost:3000/mapping/bootstrap -d '{"dryRun":true}'   # preview
 curl -X POST localhost:3000/mapping/bootstrap                        # do it
 ```
 
-This creates one Actual account per Starling category (named `Starling <label>`, or `Starling <profile> <label>` when several profiles are configured; override with `"prefix"`), reuses any account that already has that name, and writes the ids into `config/mapping.json`. Restrict it with `{"profiles":["primary"]}`. It never overwrites an existing mapping and skips entries marked `"enabled": false`, so it's safe to re-run after adding a Space.
+This creates one Actual account per Starling category (named `Starling <label>`, or `Starling <profile> <label>` when several profiles are configured; override with `"prefix"`), reuses any account that already has that name, and writes the ids into `config/mapping.json`. Restrict it with `{"profiles":["primary"]}`. It never overwrites an existing mapping, skips entries marked `"enabled": false`, and skips currency-mismatched categories — so it's safe to re-run after adding a Space.
 
 To wire things up by hand instead, fill in `actualAccountId` yourself — the file is keyed by `categoryUid`:
 
@@ -53,7 +55,7 @@ To wire things up by hand instead, fill in `actualAccountId` yourself — the fi
 }
 ```
 
-`POST /mapping/reload` picks up manual edits without a restart. Set `"enabled": false` on an entry to deliberately ignore a Space; a blank `actualAccountId` counts as unmapped.
+`POST /mapping/reload` picks up manual edits without a restart. Set `"enabled": false` on an entry to deliberately ignore a Space; a blank `actualAccountId` counts as unmapped. Give two categories the same `"accountName"` to collapse them into one Actual account instead of one each — useful when a Space's balance really lives inside a single account you'd rather see as one line (e.g. a savings account and its one Space), rather than as noise.
 
 ### 2. Backfill history
 
@@ -77,6 +79,8 @@ docker compose up -d --build
 ```
 
 This mounts `./config` (so `mapping.json` — created by `/mapping/bootstrap` or by hand — lives on the host, not in the image) and a named volume for the downloaded budget cache. The container always listens on `3000` internally; set `HOST_PORT` in `.env` to change the published port.
+
+The image installs with `npm ci` against the committed `package-lock.json`, not `bun install` — bun's installer can't resolve a working `better-sqlite3` build inside a container (falls back to compiling it, which then fails with no Python on the slim image). If you change dependencies in `package.json`, regenerate `package-lock.json` too: `npm install --package-lock-only` (alongside your normal `bun install`; the two lockfiles are independent).
 
 Don't run `docker compose config` without `--no-interpolate` against your real `.env` — it prints every resolved secret (Starling token, webhook secret, Actual password) in plaintext.
 
