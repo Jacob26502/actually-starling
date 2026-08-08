@@ -1,7 +1,7 @@
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { config, findProfile } from './config.ts';
-import { createAccount, importTransactions, listAccounts, setAccountBalance, shutdown } from './actual.ts';
+import { createAccount, getAccountBalance, getTransactions, importTransactions, listAccounts, setAccountBalance, shutdown } from './actual.ts';
 // reconcileAccountBalance is the mechanism confirmed (via source) to actually work — see the
 // comment at its call site below. Kept imported, not deleted, per instruction to comment out
 // rather than remove.
@@ -121,6 +121,46 @@ app.get('/discover', async (c) => {
 			.filter((category) => !isUsable(mapping.categories[category.categoryUid]))
 			.map((category) => ({ categoryUid: category.categoryUid, label: category.label })),
 	});
+});
+
+/**
+ * Diagnostic: for every mapped Actual account, compare Actual's actual computed balance
+ * (sum of its real transactions) against Starling's real current balance right now, plus the
+ * stored adjustment transaction's amount if one exists. Read-only — makes no changes.
+ */
+app.get('/debug/balance', async (c) => {
+	const [categories, mapping] = await Promise.all([discoverCategories(), loadMapping()]);
+	const usable = categories.filter((category) => isUsable(mapping.categories[category.categoryUid]));
+
+	const byAccount = new Map<string, typeof usable>();
+	for (const category of usable) {
+		const entry = mapping.categories[category.categoryUid]!;
+		const group = byAccount.get(entry.actualAccountId) ?? [];
+		group.push(category);
+		byAccount.set(entry.actualAccountId, group);
+	}
+
+	const results = [];
+	for (const [actualAccountId, group] of byAccount) {
+		const starlingTarget = group.reduce((sum, cat) => sum + (cat.balanceMinorUnits ?? 0), 0);
+		const [actualBalance, transactions] = await Promise.all([
+			getAccountBalance(actualAccountId),
+			getTransactions(actualAccountId, '0001-01-01', '9999-12-31'),
+		]);
+		const adjustment = transactions.find((txn) => txn.imported_id === 'starling-balance-adjustment');
+
+		results.push({
+			actualAccountId,
+			categories: group.map((cat) => cat.label),
+			starlingTarget,
+			actualBalance,
+			discrepancy: actualBalance - starlingTarget,
+			adjustmentTransaction: adjustment ? { id: adjustment.id, amount: adjustment.amount } : null,
+			transactionCount: transactions.length,
+		});
+	}
+
+	return c.json({ results });
 });
 
 app.post('/mapping/reload', async (c) => {
