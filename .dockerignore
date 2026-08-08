@@ -1,0 +1,12 @@
+node_modules
+.actual-cache*
+.env
+.env.*
+!.env.example
+config/mapping.json
+.git
+.idea
+.vscode
+*.md
+!README.md
+.claude

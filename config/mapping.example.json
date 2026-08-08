@@ -1,0 +1,25 @@
+{
+  "_comment": "Written by POST /mapping/bootstrap, or edit by hand. Keys are Starling categoryUids from GET /discover; actualAccountId comes from the same response's actualAccounts list. A blank actualAccountId counts as unmapped.",
+  "categories": {
+    "00000000-0000-0000-0000-000000000001": {
+      "actualAccountId": "replace-with-actual-account-uuid",
+      "label": "Main",
+      "profile": "primary",
+      "starlingAccountUid": "00000000-0000-0000-0000-0000000000aa",
+      "kind": "main"
+    },
+    "00000000-0000-0000-0000-000000000002": {
+      "actualAccountId": "replace-with-actual-account-uuid",
+      "label": "Holiday",
+      "profile": "primary",
+      "starlingAccountUid": "00000000-0000-0000-0000-0000000000aa",
+      "kind": "savings-goal"
+    },
+    "00000000-0000-0000-0000-000000000003": {
+      "actualAccountId": "",
+      "label": "A space I don't want synced",
+      "profile": "secondary",
+      "enabled": false
+    }
+  }
+}

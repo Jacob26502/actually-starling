@@ -13,11 +13,16 @@ dist/
 
 # deps
 node_modules/
-.wrangler
 
-# env
-.env
-.env.production
+# actual budget local cache (sqlite budget file downloaded from the server)
+.actual-cache*/
+
+# personal starling -> actual account mapping (contains your account UIDs)
+config/mapping.json
+
+# env — everything except the committed template
+.env*
+!.env.example
 .dev.vars
 
 # logs

@@ -1,0 +1,20 @@
+services:
+  actually-starling:
+    build: .
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      # Pinned regardless of .env so it always matches the port mapping below.
+      PORT: "3000"
+      ACTUAL_DATA_DIR: /app/.actual-cache
+      MAPPING_PATH: /app/config/mapping.json
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    volumes:
+      - actual-cache:/app/.actual-cache
+      - ./config:/app/config
+
+volumes:
+  actual-cache:
