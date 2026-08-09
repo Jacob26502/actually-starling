@@ -6,6 +6,12 @@
       "_comment": "Illustrative default — check what your own round-up transfers actually look like (userNote/reference/counterPartyName) and adjust the match below; this hasn't been verified against a real round-up transaction.",
       "when": [{ "field": "userNote", "contains": "round up" }],
       "then": { "category": "Round Up" }
+    },
+    {
+      "name": "Chip",
+      "_comment": "Chip uses several legal-entity names for different products (Chip Financial Ltd, Chip Financial Investments Ltd, bare 'Chip') — merge them under one payee. Deliberately excludes the Seccl Custody-routed investment transactions (identified only by a CHIP1- reference, not the counterparty name) since that's a different counterparty text.",
+      "when": [{ "field": "counterPartyName", "contains": "chip" }],
+      "then": { "payee": "Chip" }
     }
   ]
 }
