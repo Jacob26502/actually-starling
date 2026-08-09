@@ -20,7 +20,7 @@ import { applyRules, invalidateRules, loadRules } from './rules.ts';
 import {
 	discoverCategories,
 	getFeedItemsBetween,
-	profilesWithWebhookSecret,
+	profilesWithWebhookPublicKey,
 	resolveWebhookProfile,
 	type FeedItem,
 	type FeedItemWebhookPayload,
@@ -43,15 +43,15 @@ app.post('/webhook', async (c) => {
 	// Signature is over the exact bytes received, so read the raw body before parsing.
 	const rawBody = await c.req.text();
 
-	if (profilesWithWebhookSecret().length === 0) {
-		console.error('[webhook] no STARLING_<name>_WEBHOOK_SECRET configured — refusing unverifiable request');
-		return c.json({ error: 'webhook secret not configured' }, 500);
+	if (profilesWithWebhookPublicKey().length === 0) {
+		console.error('[webhook] no STARLING_<name>_WEBHOOK_PUBLIC_KEY configured — refusing unverifiable request');
+		return c.json({ error: 'webhook public key not configured' }, 500);
 	}
 
-	// Each Starling account signs with its own secret, so try them all.
+	// Each Starling account signs with its own key pair, so try them all.
 	const profile = resolveWebhookProfile(rawBody, c.req.header('X-Hook-Signature'));
 	if (!profile) {
-		console.warn('[webhook] rejected request: signature matched no configured secret');
+		console.warn('[webhook] rejected request: signature matched no configured public key');
 		return c.json({ error: 'invalid signature' }, 401);
 	}
 

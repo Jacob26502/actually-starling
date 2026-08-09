@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createPublicKey, createVerify } from 'node:crypto';
 import { config, type StarlingProfile } from './config.ts';
 
 export type Direction = 'IN' | 'OUT';
@@ -80,32 +80,40 @@ export class StarlingError extends Error {
 }
 
 /**
- * Starling signs webhooks as base64(sha512(secret + rawBody)) in `X-Hook-Signature`.
- * Must be given the raw request body — re-serialised JSON will not match.
+ * Starling's V2 webhook security signs the raw payload with SHA512withRSA using the webhook's
+ * private key and puts the signature in `X-Hook-Signature` (base64). We verify it with the
+ * *public* half of that key pair (base64 DER/SPKI, as shown on the webhook's registration
+ * page) — this is signature verification, not an HMAC shared secret. Must be given the raw
+ * request body — re-serialised JSON will not match.
  */
-export function verifyWebhookSignature(rawBody: string, signature: string | undefined, secret: string): boolean {
-	if (!signature || !secret) return false;
-	const expected = createHash('sha512').update(secret + rawBody, 'utf8').digest('base64');
-	const a = Buffer.from(expected, 'utf8');
-	const b = Buffer.from(signature, 'utf8');
-	if (a.length !== b.length) return false;
-	return timingSafeEqual(a, b);
+export function verifyWebhookSignature(rawBody: string, signature: string | undefined, publicKeyBase64: string): boolean {
+	if (!signature || !publicKeyBase64) return false;
+	try {
+		const publicKey = createPublicKey({
+			key: Buffer.from(publicKeyBase64, 'base64'),
+			format: 'der',
+			type: 'spki',
+		});
+		return createVerify('RSA-SHA512').update(rawBody, 'utf8').verify(publicKey, signature, 'base64');
+	} catch {
+		return false;
+	}
 }
 
 /**
- * Each Starling account registers its own webhook with its own shared secret, so a single
- * endpoint has to work out which one signed this request. Returns the matching profile,
- * or null if no configured secret validates it.
+ * Each Starling account registers its own webhook with its own key pair, so a single endpoint
+ * has to work out which one signed this request. Returns the matching profile, or null if no
+ * configured public key validates it.
  */
 export function resolveWebhookProfile(rawBody: string, signature: string | undefined): StarlingProfile | null {
 	for (const profile of config.starling.profiles) {
-		if (verifyWebhookSignature(rawBody, signature, profile.webhookSecret)) return profile;
+		if (verifyWebhookSignature(rawBody, signature, profile.webhookPublicKey)) return profile;
 	}
 	return null;
 }
 
-export function profilesWithWebhookSecret(): StarlingProfile[] {
-	return config.starling.profiles.filter((profile) => Boolean(profile.webhookSecret));
+export function profilesWithWebhookPublicKey(): StarlingProfile[] {
+	return config.starling.profiles.filter((profile) => Boolean(profile.webhookPublicKey));
 }
 
 const MAX_RATE_LIMIT_RETRIES = 5;

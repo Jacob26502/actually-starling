@@ -5,7 +5,7 @@ function required(name: string): string {
 }
 
 /**
- * One Starling personal access token and its webhook secret.
+ * One Starling personal access token and its webhook public key.
  *
  * A Starling token is scoped to a single account holder, and personal vs business are
  * separate account holders — so covering several real-world accounts needs several tokens.
@@ -13,7 +13,12 @@ function required(name: string): string {
 export interface StarlingProfile {
 	name: string;
 	accessToken: string;
-	webhookSecret: string;
+	/**
+	 * Base64 DER (SPKI) RSA public key from the webhook's registration page. Starling's V2
+	 * webhook security signs the raw payload with SHA512withRSA using the *private* half of
+	 * this key pair — this is not a shared secret, don't treat it like an HMAC key.
+	 */
+	webhookPublicKey: string;
 }
 
 function envKey(profileName: string): string {
@@ -35,7 +40,7 @@ function parseProfiles(): StarlingProfile[] {
 		return {
 			name,
 			accessToken: required(`STARLING_${key}_TOKEN`),
-			webhookSecret: process.env[`STARLING_${key}_WEBHOOK_SECRET`] ?? '',
+			webhookPublicKey: process.env[`STARLING_${key}_WEBHOOK_PUBLIC_KEY`] ?? '',
 		};
 	});
 }

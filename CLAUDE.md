@@ -74,12 +74,12 @@ Tokens are configured as named profiles:
 ```
 STARLING_ACCOUNTS=primary,secondary
 STARLING_PRIMARY_TOKEN=...
-STARLING_PRIMARY_WEBHOOK_SECRET=...
+STARLING_PRIMARY_WEBHOOK_PUBLIC_KEY=...
 ```
 
 `config.starling.profiles` is the parsed list; `findProfile(name)` looks one up. Names are arbitrary labels. Every Starling call takes a `StarlingProfile` as its first argument — there is no implicit "current token".
 
-Because each Starling account registers its own webhook with its own secret, `/webhook` is a single endpoint that tries every configured secret via `resolveWebhookProfile()` and reports which one matched. A profile with no secret can never match, so it can be listed for backfill-only use.
+Because each Starling account registers its own webhook with its own key pair, `/webhook` is a single endpoint that tries every configured public key via `resolveWebhookProfile()` and reports which one matched. A profile with no public key can never match, so it can be listed for backfill-only use.
 
 ### Mapping is keyed on `categoryUid`, not `accountUid`
 
@@ -102,7 +102,7 @@ Bootstrap skips both usable entries and ones explicitly marked `enabled: false`,
 - **`toActualTransaction` returns `{ ok, transaction | reason }`**, not `null`, so skips are explainable. Backfill aggregates reasons per account, which is what makes "every transaction in this account was refused" visible instead of looking like an empty account.
 - **Dates need timezone conversion, not string slicing.** Starling timestamps are UTC. A 00:30 BST transaction is `23:30Z` the previous day, so `.slice(0, 10)` lands it on the wrong day. `toActualDate()` formats via `Intl` in `STARLING_TIMEZONE` (default `Europe/London`); `en-CA` conveniently yields `YYYY-MM-DD`.
 - **Dedupe is `imported_id = feedItemUid`** with `importTransactions` (not `addTransactions`), so Actual reconciles rather than duplicating — a PENDING item later becomes SETTLED in place, and re-running a backfill is a no-op.
-- **Webhook signature is over the raw body**: `base64(sha512(secret + rawBody))` in `X-Hook-Signature`. Read `c.req.text()` and verify *before* parsing — re-serialised JSON won't match. Compared with `timingSafeEqual`.
+- **Webhook signature is RSA, not HMAC.** Starling's V2 webhook security signs the raw payload with SHA512withRSA using the webhook's *private* key and puts the base64 signature in `X-Hook-Signature`. We verify with the *public* key (base64 DER/SPKI, `STARLING_<NAME>_WEBHOOK_PUBLIC_KEY` — shown next to the webhook in the developer portal) via `crypto.createVerify('RSA-SHA512')`. This is signature verification, not a shared secret — despite Starling's own docs/UI sometimes calling the field a "secret", feeding it into an HMAC (as an earlier version of this code did) makes every signature check fail, since the two schemes aren't interchangeable. Read `c.req.text()` and verify *before* parsing — re-serialised JSON won't match.
 - **Webhook status codes are deliberate**: 5xx makes Starling retry, so permanent conditions (unmapped category, `DECLINED`/`ACCOUNT_CHECK` status, non-feed-item event) return **2xx** to stop redelivery. Only genuine transient failures should 5xx. The route intentionally writes to Actual *before* responding rather than backgrounding the work.
 - **Backfill walks the range in monthly windows** because Starling limits how wide a `transactions-between` query may be.
 

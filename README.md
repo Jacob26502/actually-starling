@@ -19,9 +19,9 @@ A Starling personal access token is scoped to **one account holder** — and per
 ```txt
 STARLING_ACCOUNTS=primary,secondary
 STARLING_PRIMARY_TOKEN=...
-STARLING_PRIMARY_WEBHOOK_SECRET=...
+STARLING_PRIMARY_WEBHOOK_PUBLIC_KEY=...
 STARLING_SECONDARY_TOKEN=...
-STARLING_SECONDARY_WEBHOOK_SECRET=...
+STARLING_SECONDARY_WEBHOOK_PUBLIC_KEY=...
 ```
 
 Names are arbitrary labels. Anything you leave out simply isn't synced — that's how you exclude an account.
@@ -77,7 +77,7 @@ Transactions can also be modified with your own simple rules (`config/rules.json
 
 ### 3. Register the webhook
 
-In the [Starling developer portal](https://developer.starlingbank.com), point a feed-item webhook at `https://your-host/webhook` and copy the shared secret into `STARLING_<NAME>_WEBHOOK_SECRET` for that profile. Starling requires HTTPS, so put this behind a reverse proxy or tunnel.
+In the [Starling developer portal](https://developer.starlingbank.com), point a feed-item webhook at `https://your-host/webhook` and copy the webhook's public key (base64 DER/SPKI) into `STARLING_<NAME>_WEBHOOK_PUBLIC_KEY` for that profile — Starling's V2 webhook security signs each payload with SHA512withRSA using the *private* half of that key pair, so despite the field sometimes being labeled "secret" it is not an HMAC key. Starling requires HTTPS, so put this behind a reverse proxy or tunnel.
 
 ## Docker
 
@@ -90,7 +90,7 @@ This mounts `./config` (so `mapping.json` — created by `/mapping/bootstrap` or
 
 The image installs with `npm ci` against the committed `package-lock.json`, not `bun install` — bun's installer can't resolve a working `better-sqlite3` build inside a container (falls back to compiling it, which then fails with no Python on the slim image). If you change dependencies in `package.json`, regenerate `package-lock.json` too: `npm install --package-lock-only` (alongside your normal `bun install`; the two lockfiles are independent).
 
-Don't run `docker compose config` without `--no-interpolate` against your real `.env` — it prints every resolved secret (Starling token, webhook secret, Actual password) in plaintext.
+Don't run `docker compose config` without `--no-interpolate` against your real `.env` — it prints every resolved secret (Starling token, webhook public key, Actual password) in plaintext.
 
 ## Routes
 
