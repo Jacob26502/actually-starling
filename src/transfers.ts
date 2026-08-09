@@ -69,6 +69,21 @@ export function isSelfTransfer(item: FeedItem, profile: StarlingProfile): boolea
  * (you), not the destination account or category — Starling doesn't say which of your other
  * accounts the money went to/from. So instead of a direct mapping lookup, search every other
  * mapped and usable Actual account for the matching peer (same day, exact opposite amount).
+ *
+ * **Deliberately strict, because the signal is weaker than it looks.** Verified against real
+ * feed data: `ON_US_PAY_ME` + `counterPartyType: "CUSTOMER"` + your own `counterPartyUid` does
+ * *not* mean "between two of my Starling accounts" — it means "a payment where I'm the named
+ * counterparty", which equally covers money sent to Chip, Wise, or an unmapped Starling account
+ * (a real EUR-account transfer here was labelled `counterPartyName: "Jacob Turner"`, identical
+ * to a genuine Personal <-> Public Acc transfer). Matching on amount+date alone would therefore
+ * attach such a payment to whichever mapped account happened to have an equal-and-opposite
+ * transaction that day. So a candidate only counts when it is itself a *real imported Starling
+ * transaction* (`imported_id` set — never a hand-entered or Actual-generated row) whose
+ * counterparty is the same account holder, i.e. both legs independently look like this side of
+ * a self-transfer. A destination outside Starling has no such feed item and can never match.
+ *
+ * Ambiguity is also refused rather than guessed: if two different accounts both offer a
+ * qualifying candidate, there's no way to tell which is real, so nothing is linked.
  */
 export async function tryLinkSelfTransfer(
 	item: FeedItem,
@@ -80,6 +95,9 @@ export async function tryLinkSelfTransfer(
 ): Promise<boolean> {
 	if (!isSelfTransfer(item, profile)) return false;
 
+	const selfName = item.counterPartyName?.trim().toLowerCase();
+	if (!selfName) return false;
+
 	const mapping = await loadMapping();
 	const candidateAccountIds = new Set(
 		Object.values(mapping.categories)
@@ -88,14 +106,22 @@ export async function tryLinkSelfTransfer(
 			.filter((id) => id !== ownAccountId),
 	);
 
+	// The far leg of a genuine self-transfer is itself an imported Starling item naming the
+	// same account holder — transform.ts puts counterPartyName on imported_payee.
+	const isRealSelfTransferLeg = (candidate: { imported_id?: string; imported_payee?: string }) =>
+		Boolean(candidate.imported_id) && candidate.imported_payee?.trim().toLowerCase() === selfName;
+
+	const matches: { accountId: string; transactionId: string }[] = [];
 	for (const candidateId of candidateAccountIds) {
-		const peer = await findTransferPeer(candidateId, -ownAmount, date);
-		if (peer) {
-			await linkTransferPair(ownAccountId, ownTransactionId, candidateId, peer.id);
-			return true;
-		}
+		const peer = await findTransferPeer(candidateId, -ownAmount, date, isRealSelfTransferLeg);
+		if (peer) matches.push({ accountId: candidateId, transactionId: peer.id });
 	}
-	return false;
+
+	if (matches.length !== 1) return false;
+
+	const [match] = matches;
+	await linkTransferPair(ownAccountId, ownTransactionId, match!.accountId, match!.transactionId);
+	return true;
 }
 
 /** First configured externalTransfers rule (config/mapping.json) this feed item matches, if any. */

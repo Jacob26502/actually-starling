@@ -220,10 +220,24 @@ export function deleteTransactionById(id: string): Promise<void> {
  * precision Actual's own built-in transfer linking uses (verified against source: `addTransfer`
  * matches on `date`, not timestamp).
  */
-export function findTransferPeer(accountId: string, expectedAmount: number, date: string): Promise<MinimalTransaction | null> {
+export function findTransferPeer(
+	accountId: string,
+	expectedAmount: number,
+	date: string,
+	/**
+	 * Extra requirement on the candidate. Needed because the first amount/date match isn't
+	 * necessarily the right one — a stricter caller (self-transfers) must be able to skip past
+	 * a candidate that fails its own test rather than take it and give up.
+	 */
+	accept?: (candidate: MinimalTransaction) => boolean,
+): Promise<MinimalTransaction | null> {
 	return withActual(async () => {
 		const transactions = (await actualApi.getTransactions(accountId, date, date)) as MinimalTransaction[];
-		return transactions.find((txn) => txn.amount === expectedAmount && !txn.transfer_id) ?? null;
+		return (
+			transactions.find(
+				(txn) => txn.amount === expectedAmount && !txn.transfer_id && (!accept || accept(txn)),
+			) ?? null
+		);
 	});
 }
 
