@@ -8,7 +8,6 @@ import {
 	getTransactions,
 	importTransactions,
 	listAccounts,
-	setAccountBalance,
 	shutdown,
 } from './actual.ts';
 // reconcileAccountBalance is the mechanism confirmed (via source) to actually work — see the
@@ -173,6 +172,67 @@ app.get('/debug/balance', async (c) => {
 });
 
 /**
+ * Runs the proven-working balance-reconciliation mechanism (src/balance.ts) directly,
+ * against every mapped account, without needing a full /backfill re-run. Uses a fixed,
+ * clearly-pre-history date (2020-01-01) for the adjustment transaction — this endpoint is a
+ * general "make the balance correct" tool now, not tied to any particular backfill's `from`.
+ */
+app.post('/debug/reconcile-balances', async (c) => {
+	const [categories, mapping] = await Promise.all([discoverCategories(), loadMapping()]);
+	const usable = categories.filter((category) => isUsable(mapping.categories[category.categoryUid]));
+
+	const byAccount = new Map<string, typeof usable>();
+	for (const category of usable) {
+		const entry = mapping.categories[category.categoryUid]!;
+		const group = byAccount.get(entry.actualAccountId) ?? [];
+		group.push(category);
+		byAccount.set(entry.actualAccountId, group);
+	}
+
+	const results = [];
+	for (const [actualAccountId, group] of byAccount) {
+		const targetBalance = group.reduce((sum, cat) => sum + (cat.balanceMinorUnits ?? 0), 0);
+		try {
+			const result = await reconcileAccountBalance(actualAccountId, targetBalance, '2020-01-01');
+			results.push({ actualAccountId, categories: group.map((cat) => cat.label), targetBalance, ...result });
+		} catch (err) {
+			results.push({ actualAccountId, categories: group.map((cat) => cat.label), error: (err as Error).message });
+		}
+	}
+
+	return c.json({ results });
+});
+
+/**
+ * Full, unfiltered transaction dump for one account — every field, no top-15 limit. For
+ * deep manual analysis without needing a new endpoint for each new question.
+ */
+app.get('/debug/transactions', async (c) => {
+	const actualAccountId = c.req.query('actualAccountId');
+	if (!actualAccountId) return c.json({ error: 'query param actualAccountId is required' }, 400);
+	const transactions = await getTransactions(actualAccountId, '0001-01-01', '9999-12-31');
+	return c.json({ actualAccountId, count: transactions.length, transactions });
+});
+
+/**
+ * Free-text search across notes/payee fields for one account — case-insensitive substring.
+ * For chasing a specific pattern (e.g. a merchant or reference fragment) without new code.
+ */
+app.get('/debug/search', async (c) => {
+	const actualAccountId = c.req.query('actualAccountId');
+	const q = (c.req.query('q') ?? '').toLowerCase();
+	if (!actualAccountId || !q) return c.json({ error: 'query params actualAccountId and q are required' }, 400);
+
+	const transactions = await getTransactions(actualAccountId, '0001-01-01', '9999-12-31');
+	const matches = transactions.filter((txn) => {
+		const haystack = `${txn.notes ?? ''} ${txn.payee_name ?? ''} ${txn.imported_payee ?? ''}`.toLowerCase();
+		return haystack.includes(q);
+	});
+
+	return c.json({ actualAccountId, query: q, matchCount: matches.length, matches });
+});
+
+/**
  * Diagnostic: find likely duplicate transactions — same date, amount, AND notes, where one
  * copy has no imported_id (never came from Starling; likely entered by hand before this sync
  * existed) and another does. Read-only; classifies rather than acts.
@@ -185,6 +245,9 @@ app.get('/debug/balance', async (c) => {
 app.get('/debug/duplicates', async (c) => {
 	const actualAccountId = c.req.query('actualAccountId');
 	if (!actualAccountId) return c.json({ error: 'query param actualAccountId is required' }, 400);
+	// strict=false groups by (date, amount) only, ignoring notes — a wider net for cases where
+	// a real Starling transaction and its manual duplicate don't share identical notes.
+	const strict = c.req.query('strict') !== 'false';
 
 	const transactions = await getTransactions(actualAccountId, '0001-01-01', '9999-12-31');
 
@@ -204,7 +267,7 @@ app.get('/debug/duplicates', async (c) => {
 
 		const byNotes = new Map<string, typeof group>();
 		for (const txn of group) {
-			const notesKey = (txn.notes ?? '').trim().toLowerCase();
+			const notesKey = strict ? (txn.notes ?? '').trim().toLowerCase() : '*';
 			const sub = byNotes.get(notesKey) ?? [];
 			sub.push(txn);
 			byNotes.set(notesKey, sub);
@@ -218,7 +281,10 @@ app.get('/debug/duplicates', async (c) => {
 			// Safe: exactly one real, imported copy to anchor against, and the rest have no
 			// imported_id at all — those are the ones to remove. Anything messier (multiple
 			// real copies, or none at all) goes to manual review instead of being guessed at.
-			if (withImportedId.length === 1 && withoutImportedId.length >= 1) {
+			// Never auto-classify in relaxed mode — without notes matching, "exactly one real +
+			// one null" could just as easily be two unrelated transactions (confirmed real case:
+			// JOHN LEWIS STORES vs STAGECOACH SERVICES sharing a date+amount by coincidence).
+			if (strict && withImportedId.length === 1 && withoutImportedId.length >= 1) {
 				for (const txn of withoutImportedId) {
 					safeToDelete.push({ id: txn.id, date: txn.date, amount: txn.amount, notes: txn.notes ?? null });
 				}
@@ -234,6 +300,7 @@ app.get('/debug/duplicates', async (c) => {
 
 	return c.json({
 		actualAccountId,
+		strict,
 		totalTransactions: transactions.length,
 		safeToDelete: {
 			count: safeToDelete.length,
@@ -560,12 +627,10 @@ app.post('/backfill', async (c) => {
 		const targetBalance = group.reduce((sum, t) => sum + (t.balanceMinorUnits ?? 0), 0);
 
 		try {
-			// Commented out per instruction to use updateAccount instead, despite this being the
-			// mechanism confirmed (via source, not the docs) to actually persist a balance change —
-			// see CLAUDE.md "Forcing an account's balance to match Starling".
-			// const result = await reconcileAccountBalance(actualAccountId, targetBalance, adjustmentDateStr);
-			await setAccountBalance(actualAccountId, targetBalance);
-			const result = { action: 'attempted' as const, adjustment: targetBalance };
+			// Restored to the mechanism confirmed (via source) to actually persist a balance
+			// change — updateAccount/setAccountBalance was proven to silently no-op. See
+			// CLAUDE.md "Forcing an account's balance to match Starling".
+			const result = await reconcileAccountBalance(actualAccountId, targetBalance, adjustmentDateStr);
 			balanceReport.push({
 				actualAccountId,
 				categories: group.map((t) => t.label),
