@@ -21,8 +21,30 @@ export interface MappingEntry {
 	kind?: string;
 }
 
+/**
+ * A transfer to/from a real third party — e.g. a credit card provider — that should be tracked
+ * as a transfer to a separate, non-Starling-synced Actual account (manually maintained, like
+ * "Barclaycard") instead of counting as ordinary spending/income. Unlike the mapped-category
+ * transfers in transfers.ts, the "other side" here isn't a Starling feed at all — it only
+ * works when a matching transaction already exists there (see findTransferPeer in actual.ts);
+ * nothing is auto-created on that account.
+ */
+export interface ExternalTransferRule {
+	match: {
+		field: 'counterPartyName' | 'counterPartyUid' | 'reference';
+		/** Case-insensitive exact match. */
+		equals?: string;
+		/** Case-insensitive substring match. Exactly one of equals/contains should be set. */
+		contains?: string;
+	};
+	actualAccountId: string;
+	/** Recorded for readability only. */
+	label?: string;
+}
+
 export interface MappingFile {
 	categories: Record<string, MappingEntry>;
+	externalTransfers?: ExternalTransferRule[];
 }
 
 let cache: MappingFile | null = null;
@@ -37,11 +59,11 @@ export async function loadMapping(): Promise<MappingFile> {
 	try {
 		const raw = await readFile(config.mappingPath, 'utf8');
 		const parsed = JSON.parse(raw) as MappingFile;
-		cache = { categories: parsed.categories ?? {} };
+		cache = { categories: parsed.categories ?? {}, externalTransfers: parsed.externalTransfers ?? [] };
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
 			console.warn(`[mapping] no mapping file at ${config.mappingPath} — every category will be unmapped`);
-			cache = { categories: {} };
+			cache = { categories: {}, externalTransfers: [] };
 		} else {
 			throw err;
 		}

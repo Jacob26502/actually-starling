@@ -21,5 +21,13 @@
       "profile": "secondary",
       "enabled": false
     }
-  }
+  },
+  "externalTransfers": [
+    {
+      "_comment": "Optional. Links a payment to a real third party (e.g. a credit card) as a transfer to a separate, non-Starling account you track by hand — instead of counting as ordinary spending. Only links to a transaction that already exists there; nothing is auto-created.",
+      "match": { "field": "counterPartyName", "equals": "Some Card Provider" },
+      "actualAccountId": "replace-with-actual-account-uuid",
+      "label": "Some Card Provider"
+    }
+  ]
 }

@@ -26,7 +26,7 @@ import {
 	type FeedItemWebhookPayload,
 } from './starling.ts';
 import { toActualTransaction } from './transform.ts';
-import { tryLinkTransfer } from './transfers.ts';
+import { tryLinkAnyTransfer } from './transfers.ts';
 
 const app = new Hono();
 
@@ -87,13 +87,23 @@ app.post('/webhook', async (c) => {
 	const resolved = await resolveTransactionCategory(withRules);
 	const result = await importTransactions(mapped.actualAccountId, [resolved]);
 
-	// Best-effort: if this is one leg of an internal transfer and the other leg has already
-	// landed (via its own webhook event, or an earlier backfill), link them via transfer_id
-	// so Actual treats it as one transfer instead of two unlinked transactions. If the peer
-	// hasn't arrived yet, its own webhook event will find *this* transaction and link it then.
+	// Best-effort: if this is one leg of a transfer (same-account Space, a payment between two
+	// of the holder's own Starling accounts, or a configured external account like a credit
+	// card) and the other leg has already landed, link them via transfer_id so Actual treats it
+	// as one transfer instead of two unlinked transactions. If the peer hasn't arrived yet, its
+	// own webhook event will find *this* transaction and link it then.
+	const mapping = await loadMapping();
 	const ownTransactionId = result.idsByImportedId[item.feedItemUid];
 	const linked = ownTransactionId
-		? await tryLinkTransfer(item, mapped.actualAccountId, ownTransactionId, resolved.amount, resolved.date)
+		? await tryLinkAnyTransfer(
+				item,
+				profile,
+				mapping.externalTransfers ?? [],
+				mapped.actualAccountId,
+				ownTransactionId,
+				resolved.amount,
+				resolved.date,
+			)
 		: false;
 
 	console.log(
@@ -583,7 +593,16 @@ app.post('/backfill', async (c) => {
 			const item = itemsByFeedItemUid.get(txn.imported_id);
 			const ownTransactionId = result.idsByImportedId[txn.imported_id];
 			if (!item || !ownTransactionId) continue;
-			if (await tryLinkTransfer(item, entry.actualAccountId, ownTransactionId, txn.amount, txn.date)) linkedTransfers++;
+			const didLink = await tryLinkAnyTransfer(
+				item,
+				profile,
+				mapping.externalTransfers ?? [],
+				entry.actualAccountId,
+				ownTransactionId,
+				txn.amount,
+				txn.date,
+			);
+			if (didLink) linkedTransfers++;
 		}
 
 		report.push({

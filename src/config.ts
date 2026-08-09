@@ -19,6 +19,18 @@ export interface StarlingProfile {
 	 * this key pair — this is not a shared secret, don't treat it like an HMAC key.
 	 */
 	webhookPublicKey: string;
+	/**
+	 * Starling's stable `counterPartyUid` for payments where this account holder pays/receives
+	 * from one of their *own other* Starling accounts (e.g. Personal <-> a different main
+	 * account, or <-> a Space under a different main account). Verified against real feed data:
+	 * these carry `source: "ON_US_PAY_ME"` and `counterPartyType: "CUSTOMER"`, with this same
+	 * uid on both legs regardless of which account or direction — unlike a same-account Space
+	 * transfer (`source: "INTERNAL_TRANSFER"`/`counterPartyType: "CATEGORY"`), which is already
+	 * detected without this. Find it by inspecting a real such payment's feed item. Optional —
+	 * without it, self-transfers between different Starling accounts just import as ordinary
+	 * transactions.
+	 */
+	selfCustomerUid?: string;
 }
 
 function envKey(profileName: string): string {
@@ -41,6 +53,7 @@ function parseProfiles(): StarlingProfile[] {
 			name,
 			accessToken: required(`STARLING_${key}_TOKEN`),
 			webhookPublicKey: process.env[`STARLING_${key}_WEBHOOK_PUBLIC_KEY`] ?? '',
+			selfCustomerUid: process.env[`STARLING_${key}_SELF_CUSTOMER_UID`] || undefined,
 		};
 	});
 }
